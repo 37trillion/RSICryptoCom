@@ -1,3 +1,4 @@
+import ssl
 import requests
 import time
 import logging
@@ -6,13 +7,16 @@ import hmac
 import json
 import websocket
 from CryptoCom import CryptoComAPI
-from trade_strategy import TradeStrategy
+from trade_strategy import *
 from urllib.parse import urljoin
 from logging_component import setup_logger
+import threading
 
+from urllib.parse import urlparse
 # Set your API key and secret key
-API_KEY = 'place your api_key here'
-SECRET_KEY = "place your secret_key here"
+api_key = 'Tkiz9QcT9SQMYxEMpobRmb'
+secret_key = 'xGTfqWzWu4zF7VizrF1Bg4'
+api_url="https://api.crypto.com/v2/"
 
 # Set the symbol and interval for the candlestick data
 SYMBOL = "CRO_USD"
@@ -28,100 +32,183 @@ STRATEGY_PARAMS = {
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+def get_auth_headers(api_key, SECERET_KEY, method, endpoint, timestamp, body=None):
+    parsed_url = urlparse(endpoint)
+    if parsed_url.query:
+        endpoint = f"{parsed_url.path}?{parsed_url.query}"
+    else:
+        endpoint = parsed_url.path
+    message = f"{timestamp}{method.upper()}{endpoint}"
+    if body:
+        message += json.dumps(body, separators=(',', ':'))
+    signature = hmac.new(secret_key.encode(), message.encode(), hashlib.sha256).hexdigest()
+    return {
+        "CB-ACCESS-KEY": api_key,
+        "CB-ACCESS-SIGN": signature,
+        "CB-ACCESS-TIMESTAMP": timestamp,
+        "CB-ACCESS-PASSPHRASE": "passphrase"  # replace with your passphrase
+    }
+
+def generate_hmac_auth(method):
+    """Generates an HMAC authentication string for API requests"""
+    payload = {}
+    payload['method'] = method
+    payload['nonce'] = str(int(time.time() * 1000))
+    payload_string = json.dumps(payload)
+    sig = hmac.new(secret_key.encode(),
+                         payload_string.encode(),
+                         hashlib.sha256).hexdigest()
+    auth = f"{api_key}:{sig}:{payload['nonce']}"
+    return auth
+
 def authenticate(ws):
     """Authenticate the websocket connection"""
-    timestamp = str(api.time()["result"])
-    signature = hmac.new(SECRET_KEY.encode(), timestamp.encode(), hashlib.sha256).hexdigest()
+    timestamp = str(api_url.time()["result"])
+    sig = hmac.new(secret_key.encode(), timestamp.encode(), hashlib.sha256).hexdigest()
     ws.send('{"id": 2, "method": "public/auth", "params": {"api_key": "%s", "timestamp": "%s", "sign": "%s"}}'
-            % (API_KEY, timestamp, signature))
+            % (api_key, timestamp, sig))
 
-def subscribe(ws):
+def subscribe(ws, authenticate):
     """Subscribe to the specified symbol's candlestick data"""
-    ws.send('{"id": 3, "method": "public/subscribe", "params": {"channels": ["kline.%s"]}}' % SYMBOL)
-    logging.INFO(f"{subscribe} status")
+    headers = {
+        'HMAC': generate_hmac_auth('public/klines'),
+    }
+    ws.send(json.dumps({
+        'id': 3,
+        'method': 'public/klines',
+        'params': {
+            'channels': [f'kline.{SYMBOL}'],
+        },
+    }), header=headers)
+    logging.info(f"{subscribe} status")
+
+def connect(ws, self):
+    
+    """Establishes a websocket connection with the Crypto.com Exchange server"""
+    auth = self.generate_hmac_auth()
+    headers = {
+        'Content-Type': 'application/json',
+        'HMAC': auth,
+    }
+    websocket.enableTrace(True)
+    self.ws = websocket.WebSocketApp("wss://stream.crypto.com/v2/user/public/heartbeat",
+                                     "wss://stream.crypto.com/v2/user/public/respond-heartbeat",
+                                      header=headers,
+                                      on_message=self.on_message,
+                                      on_error=self.on_error,
+                                      on_close=self.on_close,
+                                      on_open=self.on_open)
+    self.ws.run_forever(ping_interval=30)
+
+def handle_heartbeat(ws):
+    heartbeat_message = {
+        "id": 1234,
+        "method": "public/respond-heartbeat"
+    }
+    ws.send(json.dumps(heartbeat_message))
 
 def on_message(ws, message):
-    """Callback function for incoming websocket messages"""
-    logging.info(f"Received message: {message}")
-    if message:
-        message_json = json.loads(message)
-        if message_json and message_json.get('id'):
-            request_id = message_json['id']
-            response = requests.get(request_id)
-            if response:
-                response['result'] = message_json.get('result')
-                response['error'] = message_json.get('error')
-                response['status'] = 'done'
-                logging.info(f"Response received for request id: {request_id}")
-                del requests[request_id]
-        else:
-            logging.warning(f"Unrecognized WebSocket message: {message_json}")
+    message = json.loads(message)
+
+    if message['method'] == 'public/ticker':
+        # Handle ticker updates
+        symbol = message['params']['instrument_name']
+        price = message['params']['last']
+        print(f'{symbol} price: {price}')
+
+    elif message['method'] == 'public/trades':
+        # Handle trade updates
+        symbol = message['params']['instrument_name']
+        trades = message['params']['data']
+        for trade in trades:
+            print(f'{symbol} trade: {trade}')
+
+    elif message['method'] == 'public/order_book':
+        # Handle order book updates
+        symbol = message['params']['instrument_name']
+        bids = message['params']['bids']
+        asks = message['params']['asks']
+        print(f'{symbol} bids: {bids}')
+        print(f'{symbol} asks: {asks}')
+
+    elif message['method'] == 'public/heartbeat':
+        # Handle heartbeat messages
+        handle_heartbeat(ws)
+
     else:
-        logging.warning("Received an empty message from WebSocket server.")
-
-
-def on_open(ws):
-    """Callback function for websocket connection"""
-    logging.info("Websocket opened")
-    subscribe(ws)
-
-def on_message(ws, message):
-    """Callback function for websocket messages"""
-    logging.info(message)
-    data = json.loads(message)
-    # Handle authentication response
-    if "result" in data and data["id"] == 2:
-        if data["result"]:
-            logging.info("Authentication successful")
-        else:
-            logging.error("Authentication failed")
-            ws.close()
-    # Handle subscription response
-    elif "result" in data and data["id"] == 3:
-        if data["result"]:
-            logging.info("Subscription successful")
-        else:
-            logging.error("Subscription failed")
-            ws.close()
-    # Handle incoming data using the trade strategy object
-    else:
-        strategy.handle_message(message)
+        print(f'Unhandled message: {message}')
 
 def on_error(ws, error):
-    """Callback function for websocket errors"""
-    logging.error(error)
+    """
+    Called when an error occurs on the WebSocket.
+    """
+    print(f"Error: {error}")
+    
+def on_close(close, error, disconnect):
+    """
+    Called when the WebSocket connection is closed.
+    """
+    print("WebSocket connection closed.")
+    
+def on_open(ws):
+    api_key = 'Tkiz9QcT9SQMYxEMpobRmb'
+    secret_key = 'xGTfqWzWu4zF7VizrF1Bg4'
+    passphrase = "your_passphrase"
+    timestamp = str(time.time())
+    headers = get_auth_headers(api_key, secret_key, api_url, "GET", "/users/self/verify", timestamp)
+    subscribe_request = {
+        "type": "subscribe",
+        "product_ids": ["CRO_USD"],
+        "channels": [
+            {
+                "name": "ticker",
+                "product_ids": [
+                    "CRO_USD"
+                ]
+            }
+        ]
+    }
+    print(f'Subscribe Request: {subscribe_request}')
+    ws.send(json.dumps(subscribe_request))
+    response = requests.get(api_url, secret_key)
+    print(f'Response: {response}')
+    if 'error' in response:
+        print(f'Error: {response["error"]}')
 
-def on_close(ws):
-    """Callback function for websocket close"""
-    logging.info("Websocket closed")
+def handle_message(message):
+    if 'method' in message:
+        if message['method'] == 'ERROR':
+            error_data = json.loads(message['original'])
+            print(f"Error: {error_data['message']}")
+            # Resend subscription request with original data
+            ws.send(error_data)
+    else:
+        # Handle other messages
+        pass
+
 
 if __name__ == "__main__":
-    api = CryptoComAPI(API_KEY, SECRET_KEY)
 
-# Connect to WebSocket and start listening for messages
-    api_ws = CryptoComAPI(api, ['trade.CRO_USD'], api.parse_ws_message)
-    api_ws.connect()
-
-    # Create the TradeStrategy object
-    strategy = TradeStrategy(api, SYMBOL, INTERVAL, STRATEGY_PARAMS)
-
-    # Connect to the websocket
-    ws = websocket.WebSocketApp("wss://stream.crypto.com/v2/market",
-                                on_open=on_open,
-                                on_message=None,
+    # Initialize the WebSocket connection.
+    websocket.enableTrace(True)
+    ws = websocket.WebSocketApp("wss://stream.crypto.com/v2/user/",
+                                on_message=on_message,
                                 on_error=on_error,
-                                on_close=None,
+                                on_close=on_close,
+                                on_open=on_open,
                                 keep_running=True)
+crypocom = CryptoComAPI(api_key, secret_key, api_url)
 
-    ws.run_forever()
+CryptoComAPI(api_key, secret_key, api_url)
+
+trade_strategy()
+ws.run_forever()
+if ws.run_forever() is True:
+        ws.reconnect()
+        ws.sleep(5)
+        ws.run_forever()
+
+
+
+
     # Keep running the websocket connection
-    while True:
-        try:
-            ws.run_forever()
-        except KeyboardInterrupt:
-            ws.close()
-            break
-        except Exception as e:
-            logging.error(f"Websocket error: {e}")
-            logging.info("Retrying in 5 seconds...")
-            time.sleep(5)
