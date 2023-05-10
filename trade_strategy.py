@@ -5,8 +5,8 @@ import time
 # define the endpoint and instrument name for the Crypto.com Exchange API
 endpoint = 'https://api.crypto.com/v2/public/get-ticker'
 instrument_name = 'CRO_USD'
-api_key = 'Tkiz9QcT9SQMYxEMpobRmb'
-secret_key = 'xGTfqWzWu4zF7VizrF1Bg4'
+api_key = 
+secret_key = 
 
 # define the parameters for the GET request
 params = {'instrument_name': instrument_name}
