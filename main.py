@@ -14,8 +14,8 @@ import threading
 
 from urllib.parse import urlparse
 # Set your API key and secret key
-api_key = 'Tkiz9QcT9SQMYxEMpobRmb'
-secret_key = 'xGTfqWzWu4zF7VizrF1Bg4'
+api_key = 
+secret_key = 
 api_url="https://api.crypto.com/v2/"
 
 # Set the symbol and interval for the candlestick data
