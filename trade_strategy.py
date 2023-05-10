@@ -1,109 +1,156 @@
-import logging
-from CryptoCom import CryptoComAPI
-from ta.momentum import RSIIndicator
+import requests
+import numpy as np
+import hmac
 import time
-class TradeStrategy:
-    def __init__(self, api, symbol, interval, params):
-        self.api = api
-        self.symbol = symbol
-        self.interval = interval
-        self.buy_threshold = params.get("buy_threshold", 0.5)
-        self.sell_threshold = params.get("sell_threshold", -0.5)
-        self.stop_loss = params.get("stop_loss", -5)
-        self.rsi_period = params.get("rsi_period", 14)
-        self.rsi_upper = params.get("rsi_upper", 70)
-        self.rsi_lower = params.get("rsi_lower", 30)
-        self.last_price = None
-        self.last_bid_price = None
-        self.last_ask_price = None
-        self.last_rsi = None
-        self.order_id = None
-        self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.INFO)
+# define the endpoint and instrument name for the Crypto.com Exchange API
+endpoint = 'https://api.crypto.com/v2/public/get-ticker'
+instrument_name = 'CRO_USD'
+api_key = 'Tkiz9QcT9SQMYxEMpobRmb'
+secret_key = 'xGTfqWzWu4zF7VizrF1Bg4'
 
-    def handle_message(self, message):
-        data = self.api.parse_ws_message(message)
-        if data.get("method") == "kline.update":
-            self.process_kline_update(data.get("params"))
-        elif data.get("method") == "trade":
-            self.process_trade(data.get("params"))
+# define the parameters for the GET request
+params = {'instrument_name': instrument_name}
 
-    def process_kline_update(self, params):
-        if params.get("symbol") != self.symbol or params.get("interval") != self.interval:
-            return
-        candle = params.get("data")[0]
-        close_price = float(candle.get("c"))
-        bid_price = float(candle.get("b"))
-        ask_price = float(candle.get("a"))
-        if self.last_price is None:
-            self.last_price = close_price
-        if self.last_bid_price is None:
-            self.last_bid_price = bid_price
-        if self.last_ask_price is None:
-            self.last_ask_price = ask_price
-        rsi = self.calculate_rsi(close_price)
-        self.logger.info("Close price: {:.8f}, Bid price: {:.8f}, Ask price: {:.8f}, RSI: {:.2f}".format(close_price, bid_price, ask_price, rsi))
-        if rsi is not None and self.last_rsi is not None:
-            if self.last_rsi < self.rsi_upper and rsi >= self.rsi_upper and close_price > self.last_price and ask_price <= self.last_bid_price:
-                self.logger.info("RSI crossover upper threshold, executing sell order")
-                self.sell(ask_price)
-            elif self.last_rsi > self.rsi_lower and rsi <= self.rsi_lower and close_price < self.last_price and bid_price >= self.last_ask_price:
-                self.logger.info("RSI crossover lower threshold, executing buy order")
-                self.buy(bid_price)
-        self.last_price = close_price
-        self.last_bid_price = bid_price
-        self.last_ask_price = ask_price
-        self.last_rsi = rsi
+def get_market_data():
+    """
+    Retrieves market data for the specified cryptocurrency pair from the Crypto.com Exchange API.
+    """
+    response = requests.get(endpoint, params=params)
+    data = response.json()['result']
+    return data
 
-    def process_trade(self, params):
-        if params.get("symbol") != self.symbol:
-            return
-        price = float(params.get("p"))
-        if params.get("s") == "buy":
-            self.logger.info("Buy order executed at {:.8f}".format(price))
-            self.order_id = None
-        elif params.get("s") == "sell":
-            self.logger.info("Sell order executed at {:.8f}".format(price))
-            self.order_id = None
+def calculate_moving_average(data, period):
+    """
+    Calculates the moving average for the specified period using the closing price from the market data.
+    """
+    closing_prices = np.array([float(d['c']) for d in data])
+    moving_average = np.mean(closing_prices[-period:])
+    return moving_average
 
-    def calculate_rsi(self, close_price):
-        rsi = RSIIndicator(close_price, self.rsi_period)
-        return rsi.rsi()
+def calculate_rsi(data, period):
+    """
+    Calculates the RSI for the specified period using the closing price from the market data.
+    """
+    closing_prices = np.array([float(d['c']) for d in data])
+    delta = np.diff(closing_prices)
+    gain = delta * (delta > 0)
+    loss = -delta * (delta < 0)
+    average_gain = np.mean(gain[-period:])
+    average_loss = np.mean(loss[-period:])
+    rs = average_gain / average_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-    def execute_strategy(self, candles):
-        close_price = [float(candle["close"]) for candle in candles]
-        rsi = self.calculate_rsi(close_price)
-        last_rsi = rsi[-1]
-        logging.info(f"RSI: {last_rsi:.2f}")
 
-        if last_rsi > self.rsi_upper:
-            # Sell signal
-            if self.api.has_position(self.symbol):
-                response = self.api.close_position(
-                    self.symbol, type="limit", price=self.api.get_ticker_price(self.symbol)
-                )
-                logging.info(f"Closed position: {response}")
-            else:
-                logging.info("No position to close")
+def place_order(order_type, price, quantity):
+    """
+    Places an order of the specified type (buy or sell) at the specified price and quantity.
+    """
+    payload = {
+        'instrument_name': 'BTC_USDT',
+        'side': order_type,
+        'type': 'LIMIT',
+        'price': price,
+        'quantity': quantity,
+        'client_oid': 'YOUR_CLIENT_OID',
+    }
 
-        elif last_rsi < self.buy_threshold:
-            # Buy signal
-            if not self.api.has_position(self.symbol):
-                response = self.api.open_position(
-                    self.symbol, "buy", type="limit", price=self.api.get_ticker_price(self.symbol)
-                )
-                logging.info(f"Opened position: {response}")
-            else:
-                logging.info("Already has position")
-        else:
-            logging.info("No signal")
+    timestamp = str(int(time.time() * 1000))
+    signature_payload = timestamp + 'POST' + '/private/create-order' + json.dumps(payload)
+    signature = hmac.new(secret_key.encode(), signature_payload.encode(), hashlib.sha256).hexdigest()
 
-    def run(self):
-        while True:
-            try:
-                candles = self.api.get_candles(self.symbol, self.interval)
-                if candles:
-                    self.execute_strategy(candles)
-            except Exception as e:
-                logging.exception(f"Error occurred: {e}")
-            time.sleep(60) # Wait for 1 minute before running again
+    headers = {
+        'Content-Type': 'application/json',
+        'API-Key': api_key,
+        'API-Timestamp': timestamp,
+        'API-Signature': signature,
+    }
+
+    response = requests.post(endpoint, headers=headers, json=payload)
+    if response.status_code == 200:
+        print(f'Successfully placed {order_type} order: {response.json()}')
+    else:
+        print(f'Failed to place {order_type} order: {response.json()}')
+
+def trade_strategy():
+    """
+    Implements the automated trading strategy based on crossover margin averages and market data.
+    """
+    # Define the parameters for the trading strategy
+    buy_threshold = 0.5
+    sell_threshold = -0.5
+    stop_loss = -5
+
+    # Retrieve market data
+    market_data = get_market_data()
+    if market_data:
+        # Extract necessary data from the market data
+        asks = market_data['asks']
+        bids = market_data['bids']
+        highs = market_data['highs']
+        lows = market_data['lows']
+        current_price = market_data['current_price']
+
+        # Calculate the crossover margin averages
+        ask_avg = np.mean(asks)
+        bid_avg = np.mean(bids)
+        margin_avg = ask_avg - bid_avg
+
+        # Calculate the RSI (Relative Strength Index)
+        rsi = calculate_rsi(highs, lows, current_price)
+
+        # Perform trading decisions based on the strategy parameters and calculated values
+        if rsi < buy_threshold and margin_avg > 0:
+            # Place a buy order
+            place_order('buy', current_price, 1)
+
+        if rsi > sell_threshold or margin_avg < 0:
+            # Place a sell order
+            place_order('sell', current_price, 1)
+
+        if current_price <= stop_loss:
+            # Place a stop-loss sell order
+            place_order('sell', current_price, 1)
+
+def calculate_rsi(highs, lows, current_price):
+    """
+    Calculates the Relative Strength Index (RSI) based on the given high, low, and current price data.
+    """
+    # Calculate the price changes
+    price_changes = np.diff(lows + highs)
+
+    # Calculate the positive and negative price changes
+    positive_changes = price_changes[price_changes > 0]
+    negative_changes = np.abs(price_changes[price_changes < 0])
+
+    # Calculate the average gains and losses
+    avg_gain = np.mean(positive_changes) if len(positive_changes) > 0 else 0
+    avg_loss = np.mean(negative_changes) if len(negative_changes) > 0 else 0
+
+    # Calculate the relative strength (RS)
+    rs = avg_gain / avg_loss if avg_loss > 0 else 0
+
+    # Calculate the RSI
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def get_market_data():
+    """
+    Retrieves the market data from the Crypto.com Exchange API.
+    """
+    endpoint = 'https://api.crypto.com/v2/public/get-market-data'
+    params = {
+        'instrument_name': 'CRO_USD',
+    }
+
+    response = requests.get(endpoint, params=params)
+    if response.status_code == 200:
+        market_data = response.json()
+        return market_data
+    else:
+        print(f'Failed to retrieve market data: {response.json()}')
+        return None
+
+if __name__ == '__main__':
+    # Execute the trade strategy
+    trade_strategy()
